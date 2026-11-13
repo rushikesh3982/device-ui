@@ -34,7 +34,21 @@ struct PhoneStatus {
     Call call = CALL_IDLE;
     char callNumber[24] = ""; // the other party, while ringing or in a call
 
-    int16_t newSmsIndex = -1; // the index of the latest SMS that arrived, -1 = none
+    // SMS
+    uint8_t unreadSms = 0;
+    uint8_t smsStored = 0, smsCapacity = 0; // on the SIM (or the modem's own storage)
+    enum SmsSend : uint8_t { SMS_SEND_IDLE, SMS_SENDING, SMS_SENT, SMS_FAILED };
+    SmsSend smsSend = SMS_SEND_IDLE; // the latest message sent
+};
+
+// One text message. Received ones are kept on the SIM; sent ones only until the T-Deck restarts.
+struct PhoneSms {
+    int16_t index = -1;    // its place on the SIM, -1 = not stored there (a sent message)
+    bool incoming = true;
+    bool unread = false;
+    char number[24] = "";
+    char time[24] = "";    // as the network gives it: yy/MM/dd,hh:mm:ss+zz
+    char text[161] = "";   // plain text (characters the fonts can't show become '?')
 };
 
 class IPhone
@@ -46,6 +60,14 @@ class IPhone
     virtual bool dial(const char *number) = 0;
     virtual bool answer() = 0;
     virtual bool hangUp() = 0;
+
+    // SMS, newest first. smsVersion() changes whenever the list does, so the interface knows to redraw it.
+    virtual uint8_t smsCount() = 0;
+    virtual bool smsGet(uint8_t position, PhoneSms &out) = 0;
+    virtual bool sendSms(const char *number, const char *text) = 0;
+    virtual bool deleteSms(uint8_t position) = 0;
+    virtual void markSmsRead(uint8_t position) = 0;
+    virtual uint16_t smsVersion() = 0;
 
     static void set(IPhone *phone);
     static IPhone *get();

@@ -14,6 +14,8 @@ namespace
 constexpr uint32_t REFRESH_MS = 250;
 const lv_color_t GREEN = lv_color_hex(0x2e7d32);
 const lv_color_t RED = lv_color_hex(0xc62828);
+const lv_color_t BLUE = lv_color_hex(0x1565c0);
+const lv_color_t GREY = lv_color_hex(0x546e7a);
 
 void (*showPanel)(lv_obj_t *panel) = nullptr;
 
@@ -42,6 +44,27 @@ char homeText[96] = "";
 char detailsText[200] = "";
 char callStateText[40] = "";
 char callNumberText[24] = "";
+
+// SMS panel: a list, a message, and a new message, one shown at a time
+lv_obj_t *smsPanel = nullptr;
+lv_obj_t *smsListView = nullptr;
+lv_obj_t *smsReadView = nullptr;
+lv_obj_t *smsComposeView = nullptr;
+lv_obj_t *smsTitle = nullptr;
+lv_obj_t *smsList = nullptr;
+lv_obj_t *smsReadHeader = nullptr;
+lv_obj_t *smsReadText = nullptr;
+lv_obj_t *smsDeleteLabel = nullptr;
+lv_obj_t *smsTo = nullptr;
+lv_obj_t *smsBody = nullptr;
+lv_obj_t *smsCounter = nullptr;
+lv_obj_t *smsSendState = nullptr;
+PhoneSms smsOpen;            // the message being read (positions shift as messages come and go)
+bool smsDeleteArmed = false; // Delete asks once ("Sure?") before deleting
+uint16_t smsShownVersion = 0xffff;
+PhoneStatus::SmsSend shownSend = PhoneStatus::SMS_SEND_IDLE;
+char smsTitleText[48] = "";
+char smsSendText[40] = "";
 
 const char *const KEYPAD[] = {"1", "2", "3", "\n", "4", "5", "6", "\n", "7", "8", "9", "\n",
                               "*", "0", "#", "\n", "+", LV_SYMBOL_BACKSPACE, ""};
@@ -148,6 +171,8 @@ void buildHomeRow(lv_obj_t *homeContainer)
     lv_obj_move_to_index(homeLabel, 1);
 }
 
+void onOpenSms(lv_event_t *e); // in the SMS part below
+
 void buildPanel(lv_obj_t *mainScreen)
 {
     // Where the view's own panels sit: right of the button bar, below the top bar.
@@ -177,6 +202,11 @@ void buildPanel(lv_obj_t *mainScreen)
     lv_obj_align(detailsLabel, LV_ALIGN_TOP_LEFT, 0, 42);
     lv_obj_set_style_text_font(detailsLabel, &ui_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_label_set_text(detailsLabel, "");
+
+    lv_obj_t *smsButton = makeButton(panel, LV_SYMBOL_ENVELOPE " SMS", BLUE);
+    lv_obj_set_size(smsButton, LV_PCT(46), 32);
+    lv_obj_align(smsButton, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_add_event_cb(smsButton, onOpenSms, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *keypad = lv_buttonmatrix_create(panel);
     lv_buttonmatrix_set_map(keypad, KEYPAD);
@@ -256,6 +286,325 @@ void showCall(const PhoneStatus &s)
         callStartedAt = lv_tick_get();
 }
 
+
+// ---- SMS
+
+// "26/11/13,10:30:00+22" (yy/MM/dd,hh:mm:ss+zz) -> "13/11 10:30"
+void shortTime(const char *t, char *out, size_t len)
+{
+    if (strlen(t) >= 14 && t[8] == ',')
+        snprintf(out, len, "%.2s/%.2s %.5s", t + 6, t + 3, t + 9);
+    else
+        snprintf(out, len, "%s", t);
+}
+
+void showSmsView(lv_obj_t *view)
+{
+    lv_obj_add_flag(smsListView, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(smsReadView, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(smsComposeView, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(view, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Where the message being read now is in the list, -1 if it's gone.
+int findOpen()
+{
+    IPhone *phone = IPhone::get();
+    if (!phone)
+        return -1;
+    PhoneSms m;
+    for (uint8_t i = 0; i < phone->smsCount(); i++) {
+        if (phone->smsGet(i, m) && m.index == smsOpen.index && m.incoming == smsOpen.incoming &&
+            !strcmp(m.time, smsOpen.time) && !strcmp(m.number, smsOpen.number))
+            return i;
+    }
+    return -1;
+}
+
+void rebuildSmsList();
+
+void openCompose(const char *to)
+{
+    lv_textarea_set_text(smsTo, to ? to : "");
+    lv_textarea_set_text(smsBody, "");
+    lv_label_set_text(smsCounter, "0/160");
+    lv_label_set_text(smsSendState, "");
+    smsSendText[0] = 0;
+    showSmsView(smsComposeView);
+    lv_group_t *group = lv_group_get_default();
+    if (group)
+        lv_group_focus_obj(to && to[0] ? smsBody : smsTo);
+}
+
+void onSmsItem(lv_event_t *e)
+{
+    IPhone *phone = IPhone::get();
+    uint8_t position = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+    if (!phone || !phone->smsGet(position, smsOpen))
+        return;
+    phone->markSmsRead(position);
+    char when[16];
+    shortTime(smsOpen.time, when, sizeof when);
+    char header[64];
+    snprintf(header, sizeof header, "%s %s%s%s", smsOpen.incoming ? "From" : "To", smsOpen.number, when[0] ? ", " : "", when);
+    lv_label_set_text(smsReadHeader, header);
+    lv_label_set_text(smsReadText, smsOpen.text);
+    smsDeleteArmed = false;
+    lv_label_set_text(smsDeleteLabel, "Delete");
+    showSmsView(smsReadView);
+}
+
+void onSmsBack(lv_event_t *e)
+{
+    showSmsView(smsListView);
+    smsShownVersion = 0xffff; // redraw the list
+}
+
+void onSmsNew(lv_event_t *e)
+{
+    // a number typed on the phone panel becomes the recipient
+    openCompose(lv_textarea_get_text(numberArea));
+}
+
+void onSmsReply(lv_event_t *e)
+{
+    openCompose(smsOpen.number);
+}
+
+void onSmsCall(lv_event_t *e)
+{
+    if (IPhone::get())
+        IPhone::get()->dial(smsOpen.number);
+}
+
+void onSmsDelete(lv_event_t *e)
+{
+    if (!smsDeleteArmed) {
+        smsDeleteArmed = true;
+        lv_label_set_text(smsDeleteLabel, "Sure?");
+        return;
+    }
+    int position = findOpen();
+    if (position >= 0 && IPhone::get())
+        IPhone::get()->deleteSms((uint8_t)position);
+    onSmsBack(e);
+}
+
+void sendSms()
+{
+    IPhone *phone = IPhone::get();
+    const char *to = lv_textarea_get_text(smsTo);
+    const char *text = lv_textarea_get_text(smsBody);
+    if (!phone || !to[0] || !text[0])
+        return;
+    if (!phone->sendSms(to, text))
+        lv_label_set_text(smsSendState, "Not sent: busy, or a wrong number");
+}
+
+void onSmsSend(lv_event_t *e)
+{
+    sendSms();
+}
+
+// Enter in the message sends it; Enter in "To" moves on to the message.
+void onSmsBodyInsert(lv_event_t *e)
+{
+    const char *text = (const char *)lv_event_get_param(e);
+    if (text && strcmp(text, "\n") == 0) {
+        lv_textarea_set_insert_replace(smsBody, "");
+        sendSms();
+    }
+}
+
+void onSmsToReady(lv_event_t *e)
+{
+    lv_group_t *group = lv_group_get_default();
+    if (group)
+        lv_group_focus_obj(smsBody);
+}
+
+void onSmsBodyChanged(lv_event_t *e)
+{
+    char count[12];
+    snprintf(count, sizeof count, "%u/160", (unsigned)strlen(lv_textarea_get_text(smsBody)));
+    lv_label_set_text(smsCounter, count);
+}
+
+void onOpenSms(lv_event_t *e)
+{
+    if (!showPanel)
+        return;
+    showPanel(smsPanel);
+    showSmsView(smsListView);
+    smsShownVersion = 0xffff;
+    rebuildSmsList();
+}
+
+lv_obj_t *makeView(lv_obj_t *parent)
+{
+    lv_obj_t *view = lv_obj_create(parent);
+    lv_obj_set_size(view, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_opa(view, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(view, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(view, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_remove_flag(view, LV_OBJ_FLAG_SCROLLABLE);
+    return view;
+}
+
+lv_obj_t *smallButton(lv_obj_t *parent, const char *text, lv_color_t color, lv_event_cb_t cb, lv_obj_t **labelOut = nullptr)
+{
+    lv_obj_t *button = makeButton(parent, text, color);
+    lv_obj_set_size(button, 62, 30);
+    lv_obj_add_event_cb(button, cb, LV_EVENT_CLICKED, nullptr);
+    if (labelOut)
+        *labelOut = lv_obj_get_child(button, 0);
+    return button;
+}
+
+void buildSmsPanel(lv_obj_t *mainScreen)
+{
+    smsPanel = lv_obj_create(mainScreen);
+    lv_obj_set_pos(smsPanel, LV_PCT(12), LV_PCT(10));
+    lv_obj_set_size(smsPanel, LV_PCT(88), LV_PCT(90));
+    lv_obj_remove_flag(smsPanel, LV_OBJ_FLAG_SCROLLABLE);
+    add_style_panel_style(smsPanel);
+    lv_obj_add_flag(smsPanel, LV_OBJ_FLAG_HIDDEN);
+
+    // the list: a title with the count on the SIM, a New button, and the messages, newest first
+    smsListView = makeView(smsPanel);
+    smsTitle = lv_label_create(smsListView);
+    lv_obj_set_style_text_font(smsTitle, &ui_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(smsTitle, LV_ALIGN_TOP_LEFT, 0, 8);
+    lv_label_set_text(smsTitle, "Messages");
+    lv_obj_t *newButton = makeButton(smsListView, LV_SYMBOL_EDIT " New", BLUE);
+    lv_obj_set_size(newButton, 84, 30);
+    lv_obj_align(newButton, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_add_event_cb(newButton, onSmsNew, LV_EVENT_CLICKED, nullptr);
+    smsList = lv_list_create(smsListView);
+    lv_obj_set_size(smsList, LV_PCT(100), LV_PCT(80));
+    lv_obj_align(smsList, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_pad_all(smsList, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    // a message: who and when, the text (it scrolls), and what to do with it
+    smsReadView = makeView(smsPanel);
+    smsReadHeader = lv_label_create(smsReadView);
+    lv_obj_set_width(smsReadHeader, LV_PCT(100));
+    lv_obj_set_style_text_font(smsReadHeader, &ui_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(smsReadHeader, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_t *textBox = lv_obj_create(smsReadView);
+    lv_obj_set_size(textBox, LV_PCT(100), LV_PCT(66));
+    lv_obj_align(textBox, LV_ALIGN_TOP_LEFT, 0, 18);
+    lv_obj_set_style_pad_all(textBox, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
+    smsReadText = lv_label_create(textBox);
+    lv_obj_set_width(smsReadText, LV_PCT(100));
+    lv_label_set_long_mode(smsReadText, LV_LABEL_LONG_WRAP);
+    lv_obj_t *row = lv_obj_create(smsReadView);
+    lv_obj_set_size(row, LV_PCT(100), 34);
+    lv_obj_align(row, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(row, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    smallButton(row, "Back", GREY, onSmsBack);
+    smallButton(row, "Reply", BLUE, onSmsReply);
+    smallButton(row, "Call", GREEN, onSmsCall);
+    smallButton(row, "Delete", RED, onSmsDelete, &smsDeleteLabel);
+
+    // a new message: to, text (160 characters, one SMS), Back and Send
+    smsComposeView = makeView(smsPanel);
+    smsTo = lv_textarea_create(smsComposeView);
+    lv_textarea_set_one_line(smsTo, true);
+    lv_textarea_set_placeholder_text(smsTo, "To");
+    lv_textarea_set_accepted_chars(smsTo, "0123456789+");
+    lv_textarea_set_max_length(smsTo, 20);
+    lv_obj_set_size(smsTo, LV_PCT(100), 34);
+    lv_obj_align(smsTo, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_add_event_cb(smsTo, onSmsToReady, LV_EVENT_READY, nullptr);
+    smsBody = lv_textarea_create(smsComposeView);
+    lv_textarea_set_placeholder_text(smsBody, "Message (Enter sends it)");
+    lv_textarea_set_max_length(smsBody, 160);
+    lv_obj_set_size(smsBody, LV_PCT(100), 96);
+    lv_obj_align(smsBody, LV_ALIGN_TOP_LEFT, 0, 38);
+    lv_obj_add_event_cb(smsBody, onSmsBodyInsert, LV_EVENT_INSERT, nullptr);
+    lv_obj_add_event_cb(smsBody, onSmsBodyChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+    smsCounter = lv_label_create(smsComposeView);
+    lv_obj_set_style_text_font(smsCounter, &ui_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(smsCounter, LV_ALIGN_TOP_RIGHT, 0, 138);
+    smsSendState = lv_label_create(smsComposeView);
+    lv_obj_set_style_text_font(smsSendState, &ui_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(smsSendState, LV_ALIGN_TOP_LEFT, 0, 138);
+    lv_obj_t *back = smallButton(smsComposeView, "Back", GREY, onSmsBack);
+    lv_obj_align(back, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_t *send = makeButton(smsComposeView, LV_SYMBOL_UPLOAD " Send", GREEN);
+    lv_obj_set_size(send, 100, 30);
+    lv_obj_align(send, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_add_event_cb(send, onSmsSend, LV_EVENT_CLICKED, nullptr);
+
+    showSmsView(smsListView);
+}
+
+void rebuildSmsList()
+{
+    IPhone *phone = IPhone::get();
+    if (!phone)
+        return;
+    uint16_t version = phone->smsVersion();
+    if (version == smsShownVersion)
+        return;
+    smsShownVersion = version;
+    lv_obj_clean(smsList);
+    uint8_t count = phone->smsCount();
+    if (count == 0) {
+        lv_obj_t *none = lv_label_create(smsList);
+        lv_label_set_text(none, "No messages");
+        return;
+    }
+    PhoneSms m;
+    for (uint8_t i = 0; i < count; i++) {
+        if (!phone->smsGet(i, m))
+            break;
+        char when[16], firstLine[44], item[96];
+        shortTime(m.time, when, sizeof when);
+        size_t n = 0;
+        for (const char *p = m.text; *p && n < sizeof firstLine - 1; p++)
+            firstLine[n++] = *p == '\n' ? ' ' : *p;
+        firstLine[n] = 0;
+        snprintf(item, sizeof item, "%s%s %s  %s\n%s", m.unread ? "* " : "", m.incoming ? "" : "To", m.number, when,
+                 firstLine);
+        lv_obj_t *button = lv_list_add_button(smsList, nullptr, item);
+        lv_obj_set_style_text_font(button, &ui_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_add_event_cb(button, onSmsItem, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+    }
+}
+
+void updateSms(const PhoneStatus &s)
+{
+    if (lv_obj_has_flag(smsPanel, LV_OBJ_FLAG_HIDDEN))
+        return;
+    char title[sizeof smsTitleText];
+    if (s.smsCapacity)
+        snprintf(title, sizeof title, "Messages (%u of %u on the SIM)", s.smsStored, s.smsCapacity);
+    else
+        snprintf(title, sizeof title, "Messages");
+    setText(smsTitle, smsTitleText, sizeof smsTitleText, title);
+    if (!lv_obj_has_flag(smsListView, LV_OBJ_FLAG_HIDDEN))
+        rebuildSmsList();
+
+    if (s.smsSend != shownSend) {
+        shownSend = s.smsSend;
+        if (!lv_obj_has_flag(smsComposeView, LV_OBJ_FLAG_HIDDEN)) {
+            const char *state = s.smsSend == PhoneStatus::SMS_SENDING ? "Sending..."
+                                : s.smsSend == PhoneStatus::SMS_SENT  ? "Sent"
+                                : s.smsSend == PhoneStatus::SMS_FAILED ? "Not sent: try again"
+                                                                       : "";
+            setText(smsSendState, smsSendText, sizeof smsSendText, state);
+            if (s.smsSend == PhoneStatus::SMS_SENT)
+                lv_textarea_set_text(smsBody, "");
+        }
+    }
+}
+
 void describe(const PhoneStatus &s, char *home, size_t homeSize, char *details, size_t detailsSize)
 {
     const char *gps = !s.gnssOn ? "GPS off" : s.gnssFix ? "GPS fix" : "GPS searching";
@@ -308,6 +657,7 @@ void init(lv_obj_t *homeContainer, lv_obj_t *mainScreen, void (*show)(lv_obj_t *
     showPanel = show; // the phone registers itself later; until it does, update() shows nothing
     buildHomeRow(homeContainer);
     buildPanel(mainScreen);
+    buildSmsPanel(mainScreen);
     buildCallScreen();
 }
 
@@ -322,6 +672,12 @@ void update(void)
     char home[sizeof homeText];
     char details[sizeof detailsText];
     describe(s, home, sizeof home, details, sizeof details);
+    if (s.unreadSms) {
+        char sms[24];
+        snprintf(sms, sizeof sms, ", %u new SMS", s.unreadSms);
+        strncat(home, sms, sizeof home - strlen(home) - 1);
+    }
+    updateSms(s);
     setText(homeLabel, homeText, sizeof homeText, home);
     if (!lv_obj_has_flag(panel, LV_OBJ_FLAG_HIDDEN))
         setText(detailsLabel, detailsText, sizeof detailsText, details);
