@@ -39,6 +39,10 @@ struct PhoneStatus {
     uint8_t smsStored = 0, smsCapacity = 0; // on the SIM (or the modem's own storage)
     enum SmsSend : uint8_t { SMS_SEND_IDLE, SMS_SENDING, SMS_SENT, SMS_FAILED };
     SmsSend smsSend = SMS_SEND_IDLE; // the latest message sent
+
+    // Battery (one cell feeds the T-Deck and the modem)
+    bool batteryLow = false;         // below 3.4 V: a warning
+    bool modemOffForBattery = false; // below 3.3 V the phone switched the modem off; charge, then switch it off and on
 };
 
 // One text message. Received ones are kept on the SIM; sent ones only until the T-Deck restarts.

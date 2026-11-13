@@ -38,6 +38,7 @@ lv_obj_t *hangUpButton = nullptr;
 lv_obj_t *focusBeforeCall = nullptr;
 
 PhoneStatus::Call shownCall = PhoneStatus::CALL_IDLE;
+uint8_t shownUnread = 0;
 uint32_t callStartedAt = 0;
 uint32_t lastRefresh = 0;
 char homeText[96] = "";
@@ -608,6 +609,11 @@ void updateSms(const PhoneStatus &s)
 void describe(const PhoneStatus &s, char *home, size_t homeSize, char *details, size_t detailsSize)
 {
     const char *gps = !s.gnssOn ? "GPS off" : s.gnssFix ? "GPS fix" : "GPS searching";
+    if (s.modemOffForBattery && !s.modemAlive) {
+        snprintf(home, homeSize, "Phone off: battery low\ncharge, then switch the modem off and on");
+        snprintf(details, detailsSize, "Modem: switched off,\nbattery low.\nCharge, then switch\nthe modem off and on");
+        return;
+    }
     if (!s.modemAlive) {
         snprintf(home, homeSize, "Phone off\nthe modem's switch is off");
         snprintf(details, detailsSize, "Modem: off\n(its switch, on the\nback's right side)");
@@ -677,6 +683,14 @@ void update(void)
         snprintf(sms, sizeof sms, ", %u new SMS", s.unreadSms);
         strncat(home, sms, sizeof home - strlen(home) - 1);
     }
+    if (s.batteryLow && s.modemAlive)
+        strncat(home, ", battery low", sizeof home - strlen(home) - 1);
+
+    // The screen comes on for a call (and stays on until it is answered) and for a new SMS
+    if (s.call == PhoneStatus::CALL_RINGING || s.call == PhoneStatus::CALL_DIALING ||
+        (s.unreadSms > shownUnread))
+        lv_display_trigger_activity(NULL);
+    shownUnread = s.unreadSms;
     updateSms(s);
     setText(homeLabel, homeText, sizeof homeText, home);
     if (!lv_obj_has_flag(panel, LV_OBJ_FLAG_HIDDEN))
