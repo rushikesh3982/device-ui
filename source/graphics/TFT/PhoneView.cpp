@@ -79,6 +79,14 @@ void setText(lv_obj_t *label, char *shown, size_t size, const char *text)
     }
 }
 
+// A one-line text field 34 px high: less padding than the theme's, so the text sits in the middle and no scrollbar shows.
+void oneLineField(lv_obj_t *field)
+{
+    lv_textarea_set_one_line(field, true);
+    lv_obj_set_style_pad_ver(field, 6, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_scrollbar_mode(field, LV_SCROLLBAR_MODE_OFF);
+}
+
 lv_obj_t *makeButton(lv_obj_t *parent, const char *text, lv_color_t color)
 {
     lv_obj_t *button = lv_button_create(parent);
@@ -185,7 +193,7 @@ void buildPanel(lv_obj_t *mainScreen)
     lv_obj_add_flag(panel, LV_OBJ_FLAG_HIDDEN);
 
     numberArea = lv_textarea_create(panel);
-    lv_textarea_set_one_line(numberArea, true);
+    oneLineField(numberArea);
     lv_textarea_set_placeholder_text(numberArea, "Number");
     lv_textarea_set_accepted_chars(numberArea, "0123456789+*#");
     lv_textarea_set_max_length(numberArea, 20);
@@ -443,11 +451,10 @@ void onOpenSms(lv_event_t *e)
 
 lv_obj_t *makeView(lv_obj_t *parent)
 {
+    // No styles of its own: its labels take the panel's text colour, so they read well in every theme.
     lv_obj_t *view = lv_obj_create(parent);
+    lv_obj_remove_style_all(view);
     lv_obj_set_size(view, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_style_bg_opa(view, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(view, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_all(view, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_remove_flag(view, LV_OBJ_FLAG_SCROLLABLE);
     return view;
 }
@@ -476,7 +483,7 @@ void buildSmsPanel(lv_obj_t *mainScreen)
     smsTitle = lv_label_create(smsListView);
     lv_obj_set_style_text_font(smsTitle, &ui_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_align(smsTitle, LV_ALIGN_TOP_LEFT, 0, 8);
-    lv_label_set_text(smsTitle, "Messages");
+    lv_label_set_text(smsTitle, "SMS");
     lv_obj_t *newButton = makeButton(smsListView, LV_SYMBOL_EDIT " New", BLUE);
     lv_obj_set_size(newButton, 84, 30);
     lv_obj_align(newButton, LV_ALIGN_TOP_RIGHT, 0, 0);
@@ -499,23 +506,24 @@ void buildSmsPanel(lv_obj_t *mainScreen)
     smsReadText = lv_label_create(textBox);
     lv_obj_set_width(smsReadText, LV_PCT(100));
     lv_label_set_long_mode(smsReadText, LV_LABEL_LONG_WRAP);
+    // four buttons sharing the row's width equally
     lv_obj_t *row = lv_obj_create(smsReadView);
-    lv_obj_set_size(row, LV_PCT(100), 34);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), 30);
     lv_obj_align(row, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(row, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    smallButton(row, "Back", GREY, onSmsBack);
-    smallButton(row, "Reply", BLUE, onSmsReply);
-    smallButton(row, "Call", GREEN, onSmsCall);
-    smallButton(row, "Delete", RED, onSmsDelete, &smsDeleteLabel);
+    lv_obj_set_style_pad_column(row, 4, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_t *rowButtons[] = {smallButton(row, "Back", GREY, onSmsBack), smallButton(row, "Reply", BLUE, onSmsReply),
+                              smallButton(row, "Call", GREEN, onSmsCall),
+                              smallButton(row, "Delete", RED, onSmsDelete, &smsDeleteLabel)};
+    for (lv_obj_t *button : rowButtons)
+        lv_obj_set_flex_grow(button, 1);
 
     // a new message: to, text (160 characters, one SMS), Back and Send
     smsComposeView = makeView(smsPanel);
     smsTo = lv_textarea_create(smsComposeView);
-    lv_textarea_set_one_line(smsTo, true);
+    oneLineField(smsTo);
     lv_textarea_set_placeholder_text(smsTo, "To");
     lv_textarea_set_accepted_chars(smsTo, "0123456789+");
     lv_textarea_set_max_length(smsTo, 20);
@@ -571,10 +579,13 @@ void rebuildSmsList()
         for (const char *p = m.text; *p && n < sizeof firstLine - 1; p++)
             firstLine[n++] = *p == '\n' ? ' ' : *p;
         firstLine[n] = 0;
-        snprintf(item, sizeof item, "%s%s %s  %s\n%s", m.unread ? "* " : "", m.incoming ? "" : "To", m.number, when,
+        snprintf(item, sizeof item, "%s%s%s  %s\n%s", m.unread ? "* " : "", m.incoming ? "" : "To ", m.number, when,
                  firstLine);
         lv_obj_t *button = lv_list_add_button(smsList, nullptr, item);
         lv_obj_set_style_text_font(button, &ui_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_t *label = lv_obj_get_child(button, 0); // the list scrolls long text sideways; two still lines instead
+        lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_height(label, 2 * lv_font_get_line_height(&ui_font_montserrat_12));
         lv_obj_add_event_cb(button, onSmsItem, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
     }
 }
@@ -585,9 +596,9 @@ void updateSms(const PhoneStatus &s)
         return;
     char title[sizeof smsTitleText];
     if (s.smsCapacity)
-        snprintf(title, sizeof title, "Messages (%u of %u on the SIM)", s.smsStored, s.smsCapacity);
+        snprintf(title, sizeof title, "SMS: %u of %u on SIM", s.smsStored, s.smsCapacity);
     else
-        snprintf(title, sizeof title, "Messages");
+        snprintf(title, sizeof title, "SMS");
     setText(smsTitle, smsTitleText, sizeof smsTitleText, title);
     if (!lv_obj_has_flag(smsListView, LV_OBJ_FLAG_HIDDEN))
         rebuildSmsList();
