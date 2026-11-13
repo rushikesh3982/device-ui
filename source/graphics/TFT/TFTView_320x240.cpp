@@ -12,6 +12,9 @@
 #include "graphics/map/TileProvider.h"
 #include "graphics/map/URLService.h"
 #include "graphics/view/TFT/Themes.h"
+#ifdef TDECK_PHONE
+#include "graphics/view/TFT/PhoneView.h"
+#endif
 #include "images.h"
 #include "input/InputDriver.h"
 #include "lv_i18n.h"
@@ -705,6 +708,12 @@ void TFTView_320x240::ui_events_init(void)
             }
         }
     };
+
+#ifdef TDECK_PHONE
+    // T-Deck phone: a row on the home screen, the phone panel and the call screen
+    PhoneView::init(objects.home_container, objects.main_screen,
+                    [](lv_obj_t *panel) { THIS->ui_set_active(objects.home_button, panel, objects.top_panel); });
+#endif
 
     // main button events
     lv_obj_add_event_cb(objects.home_button, ui_event_HomeButton, LV_EVENT_ALL, this); // uses lambda above
@@ -7357,6 +7366,9 @@ void TFTView_320x240::task_handler(void)
     if (screensInitialised) {
         if (map && activePanel == objects.map_panel)
             map->task_handler();
+#ifdef TDECK_PHONE
+        PhoneView::update(); // T-Deck phone: refreshes itself every 250 ms
+#endif
 
         if (curtime - lastrun1 >= 1) { // call every 1s
             if (map) {
